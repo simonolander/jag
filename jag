@@ -1,0 +1,120 @@
+#!/usr/bin/env bash
+
+set -e
+
+REPOSITORY="$JAG_REPOSITORY"
+API_KEY="$JAG_API_KEY"
+
+function usage() {
+  EXECUTABLE="$(basename "$0")"
+  echo "Record what you're up to. The messages are saved as a commits in the configured repository."
+  echo "Use with --summarize to summarize your activity."
+  echo
+  echo "Variables:"
+  echo "  JAG_REPOSITORY   Path to the git repository where you want your activity to be recorded"
+  echo "  JAG_API_KEY      Your API key to Opper"
+  echo
+  echo "Usage:"
+  echo "  $EXECUTABLE <message> [messages [...]]"
+  echo "  $EXECUTABLE --summarize"
+  echo "  $EXECUTABLE --push"
+  echo "Example:"
+  echo "  $EXECUTABLE deltog i sprintplanering"
+}
+
+function navigate_to_repository() {
+  if [ -z "$REPOSITORY" ]; then
+    echo "Repository not configured, set JAG_REPOSITORY to the path of your repository"
+    exit 1
+  fi
+
+  if [ ! -d "$REPOSITORY" ]; then
+    echo "Repository $REPOSITORY is not a directory"
+    exit 1
+  fi
+
+  if ! cd "$REPOSITORY"; then
+    echo "Could not navigate to repository $REPOSITORY. Does the directory exist?"
+    exit 1
+  fi
+}
+
+function register_activity() {
+  (
+    navigate_to_repository
+
+    if ! git diff --cached --quiet; then
+      echo "Repository $REPOSITORY has staged changes. Please commit them before continuing."
+      exit 1
+    fi
+
+    git commit --quiet --allow-empty --message "$*"
+  )
+}
+
+function push_activity() {
+  (
+    navigate_to_repository
+    git push
+  )
+}
+
+function summarize_activity() {
+  (
+    navigate_to_repository
+
+    if [ -z "$API_KEY" ]; then
+      echo "API key not configured, set JAG_API_KEY to a valid API key"
+      exit 1
+    fi
+
+    INPUT="$(git log "--since=yesterday" "--format=%s")"
+
+    PAYLOAD="$(
+      jq -nce --arg INPUT "$INPUT" '{
+        "name": "summarize_activity",
+        "instructions": "Summera följande aktivitetslogg till en kommaseparerad lista, sorterad efter värde för verksamheten. Håll allting väldigt kort, hela resultatet ska vara max 80 tecken.",
+        "input": $INPUT,
+        "examples": [
+          {
+            "input": "undersökte i vilken utsträckning det förekommer IOT-klienter med samma konfiguration",
+            "output": "Utredning dubbelt förekommande IOT-konfigurationer",
+          },
+          {
+            "input": "arbetade med den nya plattformspiloten\ndeltog under sprintplaneringen\ndeltog i refinement\nåtgärdade bugg angående avbrutna sessioner",
+            "output": "Plattformspilot, avbrutna sessioner, sprintplanering, refinement",
+          }
+        ]
+      }'
+    )"
+
+    OUTPUT="$(
+      curl "https://api.opper.ai/v2/call" \
+        -s \
+        -H "Authorization: Bearer $API_KEY" \
+        -H "Content-Type: application/json" \
+        -d "$PAYLOAD"
+    )"
+
+    echo "$OUTPUT" | jq -rce '.message'
+  )
+}
+
+if [ "$#" == 0 ]; then
+  usage
+  exit 0
+fi
+
+CMD="$1"
+
+case "$CMD" in
+--summarize)
+  summarize_activity "$@"
+  ;;
+--push)
+  push_activity
+  ;;
+*)
+  register_activity "$@"
+  ;;
+esac
