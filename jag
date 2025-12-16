@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+
+set -e
+
+REPOSITORY="$JAG_REPOSITORY"
+OPPER_API_KEY="$JAG_API_KEY"
+
+function usage() {
+  EXECUTABLE="$(basename "$0")"
+  echo "Record what you're up to. The messages are saved as a commits in the configured repository."
+  echo "Use with --summarize to summarize your activity."
+  echo
+  echo "Configuration:"
+  echo "Set JAG_REPOSITORY to the path to the git repository where you want your activity to be recorded"
+  echo
+  echo "Usage:"
+  echo "  $EXECUTABLE <message> [additional message [...]]"
+  echo "Example:"
+  echo "  $EXECUTABLE hade refinement"
+}
+
+function navigate_to_repository() {
+  if [ -z "$REPOSITORY" ]; then
+    echo "Repository not configured, set JAG_REPOSITORY to the path of your repository"
+    exit 1
+  fi
+
+  if [ ! -d "$REPOSITORY" ]; then
+    echo "Repository $REPOSITORY is not a directory"
+    exit 1
+  fi
+
+  if ! cd "$REPOSITORY"; then
+    echo "Could not navigate to repository $REPOSITORY. Does the directory exist?"
+    exit 1
+  fi
+}
+
+function register_activity() {
+  (
+    navigate_to_repository
+
+    if ! git diff --cached --quiet; then
+      echo "Repository $REPOSITORY has staged changes. Please commit them before continuing."
+      exit 1
+    fi
+
+    git commit --quiet --allow-empty --message "$*"
+  )
+}
+
+function push_activity() {
+  (
+    navigate_to_repository
+    git push
+  )
+}
+
+function summarize_activity() {
+  (
+    navigate_to_repository
+
+    if [ -z "$OPPER_API_KEY" ]; then
+      echo "API key not configured, set JAG_API_KEY to a valid API key"
+      exit 1
+    fi
+
+    INPUT="$(git log "--since=yesterday" "--format=%s")"
+
+    PAYLOAD="$(
+      jq -nce --arg INPUT "$INPUT" '{
+        "name": "summarize_activity",
+        "instructions": "Summera följande aktivitetslogg till en kommaseparerad lista, sorterad efter värde för verksamheten. Ett, max två ord per aktivitet.",
+        "input": $INPUT
+      }'
+    )"
+
+    OUTPUT="$(
+      curl "https://api.opper.ai/v2/call" \
+        -s \
+        -H "Authorization: Bearer $OPPER_API_KEY" \
+        -H "Content-Type: application/json" \
+        -d "$PAYLOAD"
+    )"
+
+    echo "$OUTPUT" | jq -rce '.message'
+  )
+}
+
+if [ "$#" == 0 ]; then
+  usage
+  exit 0
+fi
+
+CMD="$1"
+
+case "$CMD" in
+--summarize)
+  summarize_activity "$@"
+  ;;
+--push)
+  push_activity
+  ;;
+*)
+  register_activity "$@"
+  ;;
+esac
